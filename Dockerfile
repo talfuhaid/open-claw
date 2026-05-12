@@ -12,19 +12,15 @@
 # Build stages use full bookworm; the runtime image is always bookworm-slim.
 ARG OPENCLAW_EXTENSIONS=""
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR=extensions
-ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
-ARG OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE="node:24-bookworm-slim@sha256:e8e2e91b1378f83c5b2dd15f0247f34110e2fe895f6ca7719dbb780f929368eb"
-ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST="sha256:e8e2e91b1378f83c5b2dd15f0247f34110e2fe895f6ca7719dbb780f929368eb"
+ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:22-bookworm"
+ARG OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE="node:22-bookworm-slim"
+ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST=""
 # Keep in sync with .github/actions/setup-node-env/action.yml bun-version.
 # To update: docker buildx imagetools inspect oven/bun:<version> and use the manifest-list digest.
 ARG OPENCLAW_BUN_IMAGE="oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e"
 
-# Base images are pinned to SHA256 digests for reproducible builds.
-# Dependabot refreshes these blessed digests; release builds consume the
-# reviewed base snapshot instead of mutating distro state on every build.
-# To update, run: docker buildx imagetools inspect node:24-bookworm and
-# node:24-bookworm-slim (or podman) and replace the digests below with the
-# current multi-arch manifest list entries.
+# Base images are intentionally unpinned while debugging the Google auth/gaxios issue.
+# Once confirmed working, pin the correct Node 22 digests.
 
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS ext-deps
 ARG OPENCLAW_EXTENSIONS
@@ -131,7 +127,7 @@ RUN printf 'packages:\n  - .\n  - ui\n' > /tmp/pnpm-workspace.runtime.yaml && \
 # ── Runtime base image ──────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE} AS base-runtime
 ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST
-LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm-slim" \
+LABEL org.opencontainers.image.base.name="docker.io/library/node:22-bookworm-slim" \
   org.opencontainers.image.base.digest="${OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST}"
 
 # ── Stage 3: Runtime ────────────────────────────────────────────
@@ -156,11 +152,13 @@ WORKDIR /app
 # so it must be installed explicitly here. Without it `/etc/ssl/certs/`
 # stays empty and every HTTPS outbound dies at TLS handshake with
 # `error setting certificate file`.
+# `jq` is required by the Outlook skill scripts; install the real system jq
+# so scripts do not fall back to broken user/workspace shims.
 RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates procps hostname curl git lsof openssl python3 tini && \
+      ca-certificates procps hostname curl git lsof openssl python3 tini jq && \
     update-ca-certificates
 
 RUN chown node:node /app
@@ -231,10 +229,6 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg && \
       install -m 0755 -d /etc/apt/keyrings && \
-      # Verify Docker apt signing key fingerprint before trusting it as a root key.
-      # Require exactly one primary key (`pub` in --with-colons; subkeys use `sub`) so we
-      # never pin the first fingerprint while apt trusts extra keys from the same file.
-      # Update OPENCLAW_DOCKER_GPG_FINGERPRINT when Docker rotates release keys.
       curl -fsSL https://download.docker.com/linux/debian/gpg -o /tmp/docker.gpg.asc && \
       expected_fingerprint="$(printf '%s' "$OPENCLAW_DOCKER_GPG_FINGERPRINT" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')" && \
       docker_gpg_pub_count="$(gpg --batch --show-keys --with-colons /tmp/docker.gpg.asc | awk -F: '$1 == "pub" { c++ } END { print c+0 }')" && \
@@ -282,7 +276,9 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 # at build time so python3 + venv tooling is available before this RUN executes.
 RUN python3 -m venv /opt/skills-venv \
     && /opt/skills-venv/bin/pip install --no-cache-dir \
-        websockets
+        websockets \
+        composio
+
 ENV PATH="/opt/skills-venv/bin:$PATH"
 
 # ──── Custom: Bake agent workspace ────
@@ -304,18 +300,31 @@ RUN chmod +x /usr/local/bin/openclaw-entrypoint.sh
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
 
-# Pre-create the default state dir so first-run Docker named volumes mounted
+# Pre-create the default state dirs so first-run Docker named volumes mounted
 # here inherit node ownership instead of root-owned state.
 RUN install -d -m 0700 -o node -g node /home/node/.openclaw /home/node/.outlook-mcp && \
     stat -c '%U:%G %a' /home/node/.openclaw | grep -qx 'node:node 700' && \
     stat -c '%U:%G %a' /home/node/.outlook-mcp | grep -qx 'node:node 700'
 
+# Workaround for gaxios 7.x crashing while resolving its fetch adapter in Node.
+# This forces gaxios/google-auth-library to use Node's native global fetch.
+RUN printf '%s\n' \
+      'if (typeof globalThis.fetch === "function" && typeof globalThis.window === "undefined") {' \
+      '  globalThis.window = { fetch: globalThis.fetch };' \
+      '}' \
+      > /home/node/.openclaw/gaxios-fix.cjs && \
+    chown node:node /home/node/.openclaw/gaxios-fix.cjs && \
+    chmod 600 /home/node/.openclaw/gaxios-fix.cjs
+
 ENV NODE_ENV=production
 ENV HOME=/home/node
+ENV NODE_OPTIONS="--require /home/node/.openclaw/gaxios-fix.cjs"
+# Prefer system binaries like /usr/bin/jq over any workspace/user shims.
+ENV PATH="/usr/bin:/usr/local/bin:/opt/skills-venv/bin:$PATH"
 
-# Security hardening: Run as non-root user
-# The node:24-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
+# Security hardening: Run as non-root user.
+# The node:22-bookworm image includes a 'node' user (uid 1000).
+# This reduces the attack surface by preventing container escape via root privileges.
 USER node
 
 # Start gateway server with default config.
@@ -337,5 +346,5 @@ HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
 # The entrypoint script seeds first-run config from templates + env vars,
 # then exec's into whatever CMD specifies (the OpenClaw gateway start command below).
 # Use tini as the container's init process so signals are forwarded correctly to the app and zombie child processes are cleaned up.
-ENTRYPOINT ["tini", "-s", "--","/usr/local/bin/openclaw-entrypoint.sh"]
+ENTRYPOINT ["tini", "-s", "--", "/usr/local/bin/openclaw-entrypoint.sh"]
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

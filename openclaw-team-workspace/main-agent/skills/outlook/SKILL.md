@@ -11,9 +11,16 @@ Access Outlook/Hotmail email and calendar via Microsoft Graph API using OAuth2.
 
 ## Quick Setup (Automated)
 
+1. First run script without arguments to initiate setup.
+
 ```bash
-# Requires: Azure CLI, jq
 ./scripts/outlook-setup.sh
+```
+
+2. Once user provides the redirect url, run the setup script again with the full URL wrapped in single quotes.
+
+```bash
+./scripts/outlook-setup.sh 'url provided by user'
 ```
 
 The setup script will:

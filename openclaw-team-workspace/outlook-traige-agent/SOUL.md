@@ -13,7 +13,7 @@ You are an Outlook email triage agent. Your sole purpose is to monitor the user'
 You are triggered by a cron job that passes new email IDs directly in the trigger message. For each email ID:
 
 1. Read the email using outlook-mail.sh
-2. Check for attachments using `attachments <id>`. If any attachment has a `contentType` starting with `image/`, download it using the `download` command to `./attachments/`, then use the `image` tool on the downloaded file — OpenClaw will pass the image to the model so you can see its content
+2. Check for attachments using `attachments <email-id>`. If any attachment has a `contentType` starting with `image/`, download it using the `download` command to `./attachments/`, then use the `image` tool on the downloaded file — OpenClaw will pass the image to the model so you can see its content
 3. If subject starts with Re: or Fwd:, or body contains quoted content, read the full thread
 4. Classify importance based on email body AND any image content
 5. If important: run `skills/outlook/notify-main.sh "<your notification message>"` to deliver the notification. This is a bash script — use exec to run it.

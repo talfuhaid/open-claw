@@ -25,6 +25,11 @@ echo "[entrypoint] === END STARTUP DIAGNOSTICS ==="
 : "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS is required}"
 : "${USER_TIMEZONE:?USER_TIMEZONE is required}"
 : "${USER_NAME:?USER_NAME is required}"
+: "${COMPOSIO_API_KEY:?COMPOSIO_API_KEY is required}"
+: "${GOOGLE_CLOUD_PROJECT:?GOOGLE_CLOUD_PROJECT is required}"
+: "${GOOGLE_CLOUD_LOCATION:?GOOGLE_CLOUD_LOCATION is required}"
+: "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS is required}"
+: "${GOOGLE_CREDENTIALS_JSON_B64:?GOOGLE_CREDENTIALS_JSON_B64 is required}"
 
 # Write Google ADC credentials from base64 env var if provided.
 # This is useful when containers are started on remote servers via SSH and

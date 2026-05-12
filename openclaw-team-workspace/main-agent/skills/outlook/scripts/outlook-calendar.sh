@@ -112,10 +112,25 @@ case "$1" in
             ATTENDEES_JSON=",\"attendees\": $ATTENDEES_JSON"
         fi
 
+        EVENT_DATA=$(jq -n \
+            --arg subject "$SUBJECT" \
+            --arg start "${START}:00" \
+            --arg end_time "${END}:00" \
+            --arg timezone "$TIMEZONE" \
+            --arg location "$LOCATION" \
+            --argjson attendees "${ATTENDEES_JSON:-[]}" \
+            '{
+                "subject": $subject,
+                "start": {"dateTime": $start, "timeZone": $timezone},
+                "end": {"dateTime": $end_time, "timeZone": $timezone}
+            }
+            + (if $location != "" then {"location": {"displayName": $location}} else {} end)
+            + (if ($attendees | length) > 0 then {"attendees": $attendees} else {} end)')
+
         curl -s -X POST "$API/calendar/events" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"subject\": \"$SUBJECT\", \"start\": {\"dateTime\": \"${START}:00\", \"timeZone\": \"$TIMEZONE\"}, \"end\": {\"dateTime\": \"${END}:00\", \"timeZone\": \"$TIMEZONE\"}$LOCATION_JSON$ATTENDEES_JSON}" \
+            -d "$EVENT_DATA"
             | jq '{status: "event created", subject: .subject, start: .start.dateTime, end: .end.dateTime, id: .id[-20:]}'
         ;;
     
@@ -175,10 +190,10 @@ case "$1" in
                     BODY=$(echo "$BODY" | jq --arg v "$VAL" '. + {location: {displayName: $v}}')
                     ;;
                 start)
-                    BODY=$(echo "$BODY" | jq --arg v "$VAL" ". + {start: {dateTime: $v, timeZone: \"$TIMEZONE\"}}")
+                    BODY=$(echo "$BODY" | jq --arg v "$VAL" --arg tz "$TIMEZONE" '. + {"start": {"dateTime": $v, "timeZone": $tz}}')
                     ;;
                 end)
-                    BODY=$(echo "$BODY" | jq --arg v "$VAL" ". + {end: {dateTime: $v, timeZone: \"$TIMEZONE\"}}")
+                    BODY=$(echo "$BODY" | jq --arg v "$VAL" --arg tz "$TIMEZONE" '. + {"end": {"dateTime": $v, "timeZone": $tz}}')
                     ;;
                 body)
                     BODY=$(echo "$BODY" | jq --arg v "$VAL" '. + {body: {contentType: "HTML", content: $v}}')
@@ -235,13 +250,13 @@ case "$1" in
             -d "$(jq -n \
                 --arg email "$EMAIL" \
                 --arg start "$START" \
-                --arg end "$END" \
+                --arg end_time "$END" \
                 --arg tz "$TIMEZONE" \
                 '{
-                    schedules: [$email],
-                    startTime: {dateTime: $start, timeZone: $tz},
-                    endTime: {dateTime: $end, timeZone: $tz},
-                    availabilityViewInterval: 30
+                    "schedules": [$email],
+                    "startTime": {"dateTime": $start, "timeZone": $tz},
+                    "endTime": {"dateTime": $end_time, "timeZone": $tz},
+                    "availabilityViewInterval": 30
                 }')" | jq --arg tz "$TIMEZONE" '{
                     email: .value[0].scheduleId,
                     busySlots: [.value[0].scheduleItems[] | select(.status != "free") | {
@@ -252,7 +267,6 @@ case "$1" in
                         timezone: $tz
                     }]
                 }'
-        ;;
     
     *)
         echo "Usage: outlook-calendar.sh <command> [args]"

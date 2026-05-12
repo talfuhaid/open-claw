@@ -1,17 +1,30 @@
 #!/bin/bash
 # Outlook OAuth Setup
-# Automatically creates App Registration and configures OAuth
+# Creates/reuses App Registration and configures OAuth tokens.
 #
-# NOTE: This script lives in the main agent's workspace but sets up cron
-# jobs that run scripts from the triage agent's workspace. See TRIAGE_DIR.
+# Usage:
+#   ./scripts/outlook-setup.sh
+#   ./scripts/outlook-setup.sh 'http://localhost/?code=...&session_state=...'
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRIAGE_DIR="$HOME/Projects/openclaw-team-workspace/outlook-traige-agent/skills/outlook"
 CONFIG_DIR="$HOME/.outlook-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CREDS_FILE="$CONFIG_DIR/credentials.json"
+
+# Try to find the triage Outlook skill in common workspace locations.
+if [ -d "$HOME/workspace/outlook-traige-agent/skills/outlook" ]; then
+    TRIAGE_DIR="$HOME/workspace/outlook-traige-agent/skills/outlook"
+elif [ -d "$HOME/workspace/outlook-triage-agent/skills/outlook" ]; then
+    TRIAGE_DIR="$HOME/workspace/outlook-triage-agent/skills/outlook"
+elif [ -d "$HOME/openclaw-team-workspace/outlook-triage-agent/skills/outlook" ]; then
+    TRIAGE_DIR="$HOME/openclaw-team-workspace/outlook-triage-agent/skills/outlook"
+elif [ -d "$HOME/openclaw-team-workspace/outlook-traige-agent/skills/outlook" ]; then
+    TRIAGE_DIR="$HOME/openclaw-team-workspace/outlook-traige-agent/skills/outlook"
+else
+    TRIAGE_DIR=""
+fi
 
 APP_NAME="Clawdbot-Outlook"
 REDIRECT_URI="http://localhost"
@@ -28,30 +41,25 @@ echo ""
 
 check_prereqs() {
     for cmd in jq curl; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             echo -e "${RED}Error: $cmd not installed${NC}"
-            echo "Install with: sudo apt install $cmd"
             exit 1
         fi
     done
 }
 
-# Fast path: if config.json on disk already has valid client_id + client_secret,
-# offer to reuse. This skips azure_login/create_app/create_secret/add_permissions.
-# Fast path assumes permissions on the app registration are already correct —
-# if you added a new scope to $SCOPES, decline here and take the slow path so
-# add_permissions runs.
 check_existing_creds() {
     if [ -f "$CONFIG_FILE" ]; then
         local existing_id existing_secret
-        existing_id=$(jq -r '.client_id // empty' "$CONFIG_FILE" 2>/dev/null)
-        existing_secret=$(jq -r '.client_secret // empty' "$CONFIG_FILE" 2>/dev/null)
+        existing_id="$(jq -r '.client_id // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+        existing_secret="$(jq -r '.client_secret // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+
         if [ -n "$existing_id" ] && [ -n "$existing_secret" ]; then
             echo -e "${YELLOW}Found existing credentials in ${CONFIG_FILE}${NC}"
             echo "  client_id: $existing_id"
             read -p "Use them? [Y/n] " -n 1 -r
             echo
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            if [[ ! "${REPLY:-}" =~ ^[Nn]$ ]]; then
                 CLIENT_ID="$existing_id"
                 CLIENT_SECRET="$existing_secret"
                 APP_ID="$CLIENT_ID"
@@ -61,36 +69,36 @@ check_existing_creds() {
         fi
     fi
 
-    # No usable config on disk — offer paste-from-elsewhere path
-    echo -e "${YELLOW}Do you have an existing App Registration (e.g. shared company credentials)?${NC}"
+    echo -e "${YELLOW}Do you have an existing App Registration/client credentials?${NC}"
     read -p "Paste client ID/secret manually? [y/N] " -n 1 -r
     echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "Client ID: " CLIENT_ID
-        read -s -p "Client Secret: " CLIENT_SECRET
+    if [[ "${REPLY:-}" =~ ^[Yy]$ ]]; then
+        read -r -p "Client ID: " CLIENT_ID
+        read -r -s -p "Client Secret: " CLIENT_SECRET
         echo
         APP_ID="$CLIENT_ID"
         echo -e "${GREEN}✓ Using provided credentials${NC}"
         return 0
     fi
+
     return 1
 }
 
 azure_login() {
-    if ! command -v az &> /dev/null; then
+    if ! command -v az >/dev/null 2>&1; then
         echo -e "${RED}Error: Azure CLI not installed${NC}"
-        echo "Install with: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash"
+        echo "Install Azure CLI or provide existing client ID/secret."
         exit 1
     fi
 
     echo -e "${YELLOW}Step 1: Azure Login${NC}"
 
-    if az account show &> /dev/null; then
-        CURRENT_USER=$(az account show --query user.name -o tsv)
+    if az account show >/dev/null 2>&1; then
+        CURRENT_USER="$(az account show --query user.name -o tsv)"
         echo -e "Currently logged in as: ${GREEN}$CURRENT_USER${NC}"
         read -p "Continue with this account? [Y/n] " -n 1 -r
         echo
-        if [[ $REPLY =~ ^[Nn]$ ]]; then
+        if [[ "${REPLY:-}" =~ ^[Nn]$ ]]; then
             az logout 2>/dev/null || true
         else
             return 0
@@ -98,7 +106,7 @@ azure_login() {
     fi
 
     echo "Opening browser for Azure login..."
-    echo "(If no browser available, use: az login --use-device-code)"
+    echo "(If no browser available, use device code flow.)"
 
     if ! az login --use-device-code; then
         echo -e "${RED}Login failed${NC}"
@@ -112,61 +120,69 @@ create_app() {
     echo ""
     echo -e "${YELLOW}Step 2: Creating App Registration${NC}"
 
-    EXISTING_APP=$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o tsv 2>/dev/null)
+    EXISTING_APP="$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o tsv 2>/dev/null || true)"
 
     if [ -n "$EXISTING_APP" ] && [ "$EXISTING_APP" != "null" ]; then
         echo -e "App '$APP_NAME' already exists: ${BLUE}$EXISTING_APP${NC}"
         read -p "Use existing app? [Y/n] " -n 1 -r
         echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        if [[ ! "${REPLY:-}" =~ ^[Nn]$ ]]; then
             APP_ID="$EXISTING_APP"
             echo -e "${GREEN}✓ Using existing app${NC}"
             return 0
         fi
+
         APP_NAME="$APP_NAME-$(date +%s)"
         echo "Creating new app: $APP_NAME"
     fi
 
-    APP_RESULT=$(az ad app create \
+    APP_RESULT="$(az ad app create \
         --display-name "$APP_NAME" \
         --sign-in-audience "AzureADandPersonalMicrosoftAccount" \
         --web-redirect-uris "$REDIRECT_URI" \
-        --query "{appId: appId, objectId: id}" -o json)
+        --query "{appId: appId, objectId: id}" -o json)"
 
-    APP_ID=$(echo "$APP_RESULT" | jq -r '.appId')
+    APP_ID="$(echo "$APP_RESULT" | jq -r '.appId')"
     echo -e "${GREEN}✓ App created: $APP_ID${NC}"
 }
 
 create_secret() {
-    echo -e "${RED}WARNING: This will reset the client secret and invalidate all existing tokens!${NC}"
+    echo -e "${RED}WARNING: This will reset/create a client secret and may invalidate existing tokens.${NC}"
     read -p "Are you sure? [y/N] " -n 1 -r CONFIRM
     echo
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+
+    if [[ ! "${CONFIRM:-}" =~ ^[Yy]$ ]]; then
         echo "Skipping secret reset."
+
         if [ ! -f "$CONFIG_FILE" ]; then
-            echo -e "${RED}No existing config to load from. Re-run and choose to reset the secret, or paste credentials when prompted.${NC}"
+            echo -e "${RED}No existing config to load from.${NC}"
+            echo "Re-run and choose to reset/create a secret, or paste credentials manually."
             exit 1
         fi
+
         echo -e "${YELLOW}Loading existing credentials from config...${NC}"
-        CLIENT_ID=$(jq -r '.client_id // empty' "$CONFIG_FILE")
-        CLIENT_SECRET=$(jq -r '.client_secret // empty' "$CONFIG_FILE")
+        CLIENT_ID="$(jq -r '.client_id // empty' "$CONFIG_FILE")"
+        CLIENT_SECRET="$(jq -r '.client_secret // empty' "$CONFIG_FILE")"
+
         if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
             echo -e "${RED}Existing config is missing client_id or client_secret.${NC}"
             exit 1
         fi
+
         return
     fi
+
     echo ""
     echo -e "${YELLOW}Step 3: Creating Client Secret${NC}"
 
-    SECRET_RESULT=$(az ad app credential reset \
+    SECRET_RESULT="$(az ad app credential reset \
         --id "$APP_ID" \
         --display-name "clawdbot-secret" \
         --years 2 \
-        --query "{clientId: appId, clientSecret: password}" -o json 2>/dev/null)
+        --query "{clientId: appId, clientSecret: password}" -o json 2>/dev/null)"
 
-    CLIENT_ID=$(echo "$SECRET_RESULT" | jq -r '.clientId')
-    CLIENT_SECRET=$(echo "$SECRET_RESULT" | jq -r '.clientSecret')
+    CLIENT_ID="$(echo "$SECRET_RESULT" | jq -r '.clientId')"
+    CLIENT_SECRET="$(echo "$SECRET_RESULT" | jq -r '.clientSecret')"
 
     if [ -z "$CLIENT_SECRET" ] || [ "$CLIENT_SECRET" = "null" ]; then
         echo -e "${RED}Failed to create secret${NC}"
@@ -182,12 +198,12 @@ add_permissions() {
 
     GRAPH_API="00000003-0000-0000-c000-000000000000"
 
-    MAIL_RW_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Mail.ReadWrite'].id" -o tsv 2>/dev/null)
-    MAIL_SEND_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Mail.Send'].id" -o tsv 2>/dev/null)
-    CAL_RW_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Calendars.ReadWrite'].id" -o tsv 2>/dev/null)
-    USER_READ_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='User.Read'].id" -o tsv 2>/dev/null)
-    MBOX_SETTINGS_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='MailboxSettings.Read'].id" -o tsv 2>/dev/null)
-    USER_BASIC_ALL_ID=$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='User.ReadBasic.All'].id" -o tsv 2>/dev/null)
+    MAIL_RW_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Mail.ReadWrite'].id" -o tsv 2>/dev/null || true)"
+    MAIL_SEND_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Mail.Send'].id" -o tsv 2>/dev/null || true)"
+    CAL_RW_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='Calendars.ReadWrite'].id" -o tsv 2>/dev/null || true)"
+    USER_READ_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='User.Read'].id" -o tsv 2>/dev/null || true)"
+    MBOX_SETTINGS_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='MailboxSettings.Read'].id" -o tsv 2>/dev/null || true)"
+    USER_BASIC_ALL_ID="$(az ad sp show --id "$GRAPH_API" --query "oauth2PermissionScopes[?value=='User.ReadBasic.All'].id" -o tsv 2>/dev/null || true)"
 
     az ad app permission add --id "$APP_ID" \
         --api "$GRAPH_API" \
@@ -199,13 +215,13 @@ add_permissions() {
             "$MBOX_SETTINGS_ID=Scope" \
             "$USER_BASIC_ALL_ID=Scope" 2>/dev/null || true
 
-    echo -e "${GREEN}✓ Permissions added:${NC}"
+    echo -e "${GREEN}✓ Permissions added/requested:${NC}"
     echo "    Mail.ReadWrite, Mail.Send, Calendars.ReadWrite,"
     echo "    User.Read, MailboxSettings.Read, User.ReadBasic.All"
 }
 
 save_config() {
-    if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+    if [ -z "${CLIENT_ID:-}" ] || [ -z "${CLIENT_SECRET:-}" ]; then
         echo -e "${RED}Refusing to write config: CLIENT_ID or CLIENT_SECRET is empty${NC}"
         exit 1
     fi
@@ -219,16 +235,15 @@ save_config() {
     echo ""
     echo -e "${YELLOW}Saving Configuration${NC}"
 
-    # timezone is seeded empty and populated by test_connection (or
-    # later by outlook-token.sh refresh) from /me/mailboxSettings.
-    # Windows timezone format, e.g. "India Standard Time".
-    cat > "$CONFIG_FILE" << EOF
-{
-  "client_id": "$CLIENT_ID",
-  "client_secret": "$CLIENT_SECRET",
-  "timezone": ""
-}
-EOF
+    jq -n \
+        --arg client_id "$CLIENT_ID" \
+        --arg client_secret "$CLIENT_SECRET" \
+        --arg timezone "" \
+        '{
+            "client_id": $client_id,
+            "client_secret": $client_secret,
+            "timezone": $timezone
+        }' > "$CONFIG_FILE"
 
     chmod 600 "$CONFIG_FILE"
     echo -e "${GREEN}✓ Config saved to $CONFIG_FILE${NC}"
@@ -239,69 +254,78 @@ authorize() {
     echo -e "${YELLOW}User Authorization${NC}"
     echo ""
 
-    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=$REDIRECT_URI&scope=$(echo $SCOPES | sed 's/ /%20/g')&response_mode=query"
+    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=$REDIRECT_URI&scope=$(printf '%s' "$SCOPES" | sed 's/ /%20/g')&response_mode=query"
 
-    echo "Open this URL in your browser:"
-    echo ""
-    echo -e "${BLUE}$AUTH_URL${NC}"
-    echo ""
-    echo "After authorizing, you'll be redirected to a page that won't load."
-    echo "Copy the FULL URL from the address bar and paste it here:"
-    echo ""
-    read -p "URL: " REDIRECT_URL
+    REDIRECT_URL="${1:-}"
 
-    AUTH_CODE=$(echo "$REDIRECT_URL" | grep -oP 'code=\K[^&]+' || echo "")
+    if [ -z "$REDIRECT_URL" ]; then
+        echo "Open this URL in your browser:"
+        echo ""
+        echo -e "${BLUE}$AUTH_URL${NC}"
+        echo ""
+        echo "After authorizing, you will be redirected to a page that may not load."
+        echo "Copy the FULL URL from the address bar and paste it here:"
+        echo ""
+        read -r -p "URL: " REDIRECT_URL
+    else
+        echo "Using redirect URL passed as argument."
+    fi
+
+    AUTH_CODE="$(printf '%s' "$REDIRECT_URL" | grep -oP 'code=\K[^&]+' || true)"
 
     if [ -z "$AUTH_CODE" ]; then
         echo -e "${RED}Could not extract authorization code from URL${NC}"
+        echo "Received URL was:"
+        printf '%s\n' "$REDIRECT_URL"
         exit 1
     fi
 
     echo ""
     echo "Exchanging code for tokens..."
 
-    # Use --data-urlencode to avoid putting the client_secret on curl's
-    # command line where it would leak via /proc/<pid>/cmdline.
-    TOKEN_RESPONSE=$(curl -s -X POST "https://login.microsoftonline.com/common/oauth2/v2.0/token" \
+    TOKEN_RESPONSE="$(curl -s -X POST "https://login.microsoftonline.com/common/oauth2/v2.0/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         --data-urlencode "client_id=$CLIENT_ID" \
         --data-urlencode "client_secret=$CLIENT_SECRET" \
         --data-urlencode "code=$AUTH_CODE" \
         --data-urlencode "redirect_uri=$REDIRECT_URI" \
         --data-urlencode "grant_type=authorization_code" \
-        --data-urlencode "scope=$SCOPES")
+        --data-urlencode "scope=$SCOPES")"
 
-    if echo "$TOKEN_RESPONSE" | jq -e '.access_token' > /dev/null 2>&1; then
+    if echo "$TOKEN_RESPONSE" | jq -e '.access_token' >/dev/null 2>&1; then
+        mkdir -p "$CONFIG_DIR"
+
         if [ -f "$CREDS_FILE" ]; then
             cp "$CREDS_FILE" "$CREDS_FILE.bak.$(date +%Y%m%d-%H%M%S)"
         fi
-        echo "$TOKEN_RESPONSE" > "$CREDS_FILE"
+
+        NOW="$(date +%s)"
+        EXPIRES_IN="$(echo "$TOKEN_RESPONSE" | jq -r '.expires_in // 3600')"
+        EXPIRES_AT="$((NOW + EXPIRES_IN))"
+
+        echo "$TOKEN_RESPONSE" | jq --argjson exp "$EXPIRES_AT" '. + {"expires_at": $exp}' > "$CREDS_FILE"
+
         chmod 600 "$CREDS_FILE"
-        echo -e "${GREEN}✓ Tokens saved${NC}"
+        echo -e "${GREEN}✓ Tokens saved to $CREDS_FILE${NC}"
     else
         echo -e "${RED}Failed to get tokens:${NC}"
-        echo "$TOKEN_RESPONSE" | jq '.error_description // .'
+        echo "$TOKEN_RESPONSE" | jq '.'
         exit 1
     fi
 }
 
-# Per-scope verification. Each check isolates one consent so failures
-# point at exactly which scope didn't land. Inbox is hard-required;
-# the other two warn but don't abort so setup still completes on
-# tenants where admin consent for User.ReadBasic.All is pending.
 test_connection() {
     echo ""
     echo -e "${YELLOW}Testing Connection${NC}"
 
-    ACCESS_TOKEN=$(jq -r '.access_token' "$CREDS_FILE")
+    ACCESS_TOKEN="$(jq -r '.access_token' "$CREDS_FILE")"
 
-    # 1. Mail.ReadWrite — inbox access. Required.
-    INBOX=$(curl -s "https://graph.microsoft.com/v1.0/me/mailFolders/inbox" \
-        -H "Authorization: Bearer $ACCESS_TOKEN")
+    INBOX="$(curl -s "https://graph.microsoft.com/v1.0/me/mailFolders/inbox" \
+        -H "Authorization: Bearer $ACCESS_TOKEN")"
 
-    if echo "$INBOX" | jq -e '.totalItemCount' > /dev/null 2>&1; then
-        TOTAL=$(echo "$INBOX" | jq '.totalItemCount')
-        UNREAD=$(echo "$INBOX" | jq '.unreadItemCount')
+    if echo "$INBOX" | jq -e '.totalItemCount' >/dev/null 2>&1; then
+        TOTAL="$(echo "$INBOX" | jq '.totalItemCount')"
+        UNREAD="$(echo "$INBOX" | jq '.unreadItemCount')"
         echo -e "${GREEN}✓ Inbox access (Mail.ReadWrite)${NC}"
         echo -e "    ${BLUE}$TOTAL${NC} emails (${YELLOW}$UNREAD${NC} unread)"
     else
@@ -310,12 +334,11 @@ test_connection() {
         exit 1
     fi
 
-    # 2. MailboxSettings.Read — timezone caching. Warn-on-fail.
-    MBOX_RESPONSE=$(curl -s "https://graph.microsoft.com/v1.0/me/mailboxSettings/timeZone" \
-        -H "Authorization: Bearer $ACCESS_TOKEN")
+    MBOX_RESPONSE="$(curl -s "https://graph.microsoft.com/v1.0/me/mailboxSettings/timeZone" \
+        -H "Authorization: Bearer $ACCESS_TOKEN")"
 
-    if echo "$MBOX_RESPONSE" | jq -e '.value' > /dev/null 2>&1; then
-        TIMEZONE=$(echo "$MBOX_RESPONSE" | jq -r '.value')
+    if echo "$MBOX_RESPONSE" | jq -e '.value' >/dev/null 2>&1; then
+        TIMEZONE="$(echo "$MBOX_RESPONSE" | jq -r '.value')"
         jq --arg tz "$TIMEZONE" '.timezone = $tz' "$CONFIG_FILE" > /tmp/outlook-config.json \
             && mv /tmp/outlook-config.json "$CONFIG_FILE"
         chmod 600 "$CONFIG_FILE"
@@ -324,31 +347,29 @@ test_connection() {
     else
         echo -e "${YELLOW}⚠ Mailbox settings access failed (MailboxSettings.Read)${NC}"
         echo "$MBOX_RESPONSE" | jq '.error.message // .'
-        echo "    Timezone won't be cached. Re-run authorize with the scope consented,"
-        echo "    or set ~/.outlook-mcp/config.json timezone field manually"
-        echo "    (Windows format, e.g. \"India Standard Time\")."
+        echo "    Timezone will not be cached automatically."
     fi
 
-    # 3. User.ReadBasic.All — people lookup. Warn-on-fail.
-    PEOPLE_RESPONSE=$(curl -s "https://graph.microsoft.com/v1.0/users?\$top=1&\$select=displayName" \
-        -H "Authorization: Bearer $ACCESS_TOKEN")
+    PEOPLE_RESPONSE="$(curl -s "https://graph.microsoft.com/v1.0/users?\$top=1&\$select=displayName" \
+        -H "Authorization: Bearer $ACCESS_TOKEN")"
 
-    if echo "$PEOPLE_RESPONSE" | jq -e '.value' > /dev/null 2>&1; then
+    if echo "$PEOPLE_RESPONSE" | jq -e '.value' >/dev/null 2>&1; then
         echo -e "${GREEN}✓ People lookup (User.ReadBasic.All)${NC}"
     else
         echo -e "${YELLOW}⚠ People lookup failed (User.ReadBasic.All)${NC}"
         echo "$PEOPLE_RESPONSE" | jq '.error.message // .'
-        echo "    Work/school accounts may require admin consent for this scope."
-        echo "    Person-by-name lookups in the agent will not work until granted."
+        echo "    Person-by-name lookups may not work until admin consent is granted."
     fi
 }
 
-# Cron jobs run scripts from the triage agent workspace ($TRIAGE_DIR),
-# not this script's own dir. We're being invoked from the main agent's
-# scripts/ dir during setup, but the scheduler drives the triage side.
 setup_cron() {
     echo ""
     echo -e "${YELLOW}Setting up cron jobs${NC}"
+
+    if [ -z "$TRIAGE_DIR" ]; then
+        echo -e "${YELLOW}⚠ Skipping cron setup — triage Outlook skill directory not found.${NC}"
+        return
+    fi
 
     local missing=()
     for script in check-and-trigger.sh outlook-seen.sh; do
@@ -356,10 +377,18 @@ setup_cron() {
             missing+=("$script")
         fi
     done
-    if [ ${#missing[@]} -gt 0 ]; then
+
+    if [ "${#missing[@]}" -gt 0 ]; then
         echo -e "${YELLOW}⚠ Skipping cron setup — missing or non-executable in $TRIAGE_DIR:${NC}"
-        for s in "${missing[@]}"; do echo "    $s"; done
-        echo "    Make them executable (chmod +x) and re-run this script to register cron."
+        for s in "${missing[@]}"; do
+            echo "    $s"
+        done
+        echo "    Make them executable with chmod +x and re-run setup."
+        return
+    fi
+
+    if ! command -v crontab >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Skipping cron setup — crontab not installed.${NC}"
         return
     fi
 
@@ -383,7 +412,7 @@ main() {
     fi
 
     save_config
-    authorize
+    authorize "${1:-}"
     test_connection
     setup_cron
 
@@ -391,12 +420,12 @@ main() {
     echo -e "${GREEN}=== Setup Complete! ===${NC}"
     echo ""
     echo "You can now use:"
-    echo "  outlook-mail.sh inbox          - List emails"
-    echo "  outlook-mail.sh unread         - List unread"
-    echo "  outlook-mail.sh search X       - Search emails"
-    echo "  outlook-calendar.sh today      - Today's events"
-    echo "  outlook-calendar.sh week       - This week's events"
-    echo "  outlook-token.sh refresh       - Refresh token (also re-caches timezone)"
+    echo "  outlook-mail.sh inbox"
+    echo "  outlook-mail.sh unread"
+    echo "  outlook-mail.sh search X"
+    echo "  outlook-calendar.sh today"
+    echo "  outlook-calendar.sh week"
+    echo "  outlook-token.sh refresh"
 }
 
 main "$@"

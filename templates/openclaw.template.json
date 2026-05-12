@@ -7,6 +7,9 @@
       "models": {
         "google-vertex/gemini-3.1-pro-preview": {},
         "google-vertex/gemini-3-flash-preview": {}
+      },
+      "imageModel": {
+        "primary": "google-vertex/gemini-3-flash-preview"
       }
     },
     "list": [
