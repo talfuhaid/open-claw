@@ -75,9 +75,6 @@
       ]
     }
   },
-  "session": {
-    "dmScope": "per-channel-peer"
-  },
   "tools": {
     "profile": "coding",
     "agentToAgent": {
