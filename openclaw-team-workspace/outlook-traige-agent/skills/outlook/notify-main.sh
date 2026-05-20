@@ -3,37 +3,60 @@ set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-MESSAGE="Outlook triage alert: ${1:-}"
+case "${1:-}" in
+  ""|"-h"|"--help"|"help")
+    echo "Usage: notify-main.sh <alert message>" >&2
+    exit 2
+    ;;
+  "HEARTBEAT_OK"|"NO_REPLY")
+    echo "Refusing to send non-alert control message: $1" >&2
+    exit 2
+    ;;
+esac
 
-if [ -z "$MESSAGE" ]; then
-  echo "Usage: notify-main.sh <message>"
-  exit 1
-fi
+ALERT_TEXT="$*"
 
-CONFIG="$HOME/.openclaw/openclaw.json"
-SESSIONS="$HOME/.openclaw/agents/main/sessions/sessions.json"
+case "$ALERT_TEXT" in
+  *"Usage:"*|*"command not found"*|*"No such file"*|*"Permission denied"*|*"Traceback"*|*"Error:"*)
+    echo "Refusing to send diagnostic/error text as Outlook alert" >&2
+    exit 2
+    ;;
+esac
+
+MESSAGE="Outlook triage alert: $ALERT_TEXT"
+
+OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+OUTLOOK_CONFIG="${OUTLOOK_CONFIG:-$HOME/.outlook-mcp/config.json}"
+CONFIG="$OPENCLAW_HOME/openclaw.json"
+TOKENS="$OPENCLAW_HOME/.tokens"
 
 if [ ! -f "$CONFIG" ]; then
-  echo "Error: config not found: $CONFIG"
+  echo "Error: config not found: $CONFIG" >&2
   exit 1
 fi
 
-if [ ! -f "$SESSIONS" ]; then
-  echo "Error: sessions file not found: $SESSIONS"
+# Load hook token. Prefer .tokens because entrypoint exports/substitutes from there.
+if [ -f "$TOKENS" ]; then
+  # shellcheck disable=SC1090
+  . "$TOKENS"
+fi
+
+HOOK_TOKEN="${HOOKS_TOKEN:-}"
+
+if [ -z "$HOOK_TOKEN" ] || [ "$HOOK_TOKEN" = "null" ]; then
+  HOOK_TOKEN="$(jq -r '.hooks.token // empty' "$CONFIG")"
+fi
+
+if [ -z "$HOOK_TOKEN" ] || [ "$HOOK_TOKEN" = "null" ]; then
+  echo "Error: hooks token missing. Checked $TOKENS and .hooks.token in $CONFIG" >&2
   exit 1
 fi
 
-HOOK_TOKEN="$(jq -r '.hooks.token // empty' "$CONFIG")"
 GATEWAY_BIND="$(jq -r '.gateway.bind // .bind // "loopback"' "$CONFIG")"
 GATEWAY_PORT="$(jq -r '.gateway.port // .port // empty' "$CONFIG")"
 
 if [ -z "$GATEWAY_PORT" ] || [ "$GATEWAY_PORT" = "null" ]; then
   GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-fi
-
-if [ -z "$HOOK_TOKEN" ] || [ "$HOOK_TOKEN" = "null" ]; then
-  echo "Error: hooks.token missing from $CONFIG"
-  exit 1
 fi
 
 if [ "$GATEWAY_BIND" = "loopback" ] || [ "$GATEWAY_BIND" = "localhost" ]; then
@@ -43,80 +66,74 @@ else
 fi
 
 if ! curl -sS --max-time 3 "$GATEWAY_URL/healthz" >/dev/null 2>&1; then
-  echo "Error: OpenClaw gateway is not reachable at $GATEWAY_URL"
-  echo "Debug:"
-  echo "  GATEWAY_BIND=$GATEWAY_BIND"
-  echo "  GATEWAY_PORT=$GATEWAY_PORT"
-  echo "  CONFIG=$CONFIG"
+  echo "Error: OpenClaw gateway is not reachable at $GATEWAY_URL" >&2
+  echo "Debug:" >&2
+  echo "  GATEWAY_BIND=$GATEWAY_BIND" >&2
+  echo "  GATEWAY_PORT=$GATEWAY_PORT" >&2
+  echo "  CONFIG=$CONFIG" >&2
   exit 1
 fi
 
-SESSION_KEYS="$(jq -r 'keys[] | select(startswith("agent:main:"))' "$SESSIONS" | sort -u)"
+TELEGRAM_ID=""
 
-if [ -z "$SESSION_KEYS" ]; then
-  echo "Error: no main-agent sessions found in $SESSIONS"
-  exit 1
+if [ -f "$OUTLOOK_CONFIG" ]; then
+  TELEGRAM_ID="$(jq -r '.notification_targets.telegram // empty' "$OUTLOOK_CONFIG" 2>/dev/null | head -n 1)"
 fi
 
-echo "$SESSION_KEYS" | while IFS= read -r SESSION_KEY; do
-  [ -z "$SESSION_KEY" ] && continue
+if [ -z "$TELEGRAM_ID" ] || [ "$TELEGRAM_ID" = "null" ]; then
+  TELEGRAM_ID="$(
+    jq -r '
+      (.session.identityLinks // {})
+      | keys[]
+      | select(startswith("telegram:"))
+      | sub("^telegram:"; "")
+    ' "$CONFIG" 2>/dev/null | head -n 1
+  )"
+fi
 
-  AGENT_ID="$(printf '%s' "$SESSION_KEY" | cut -d: -f2)"
-  CHANNEL="$(printf '%s' "$SESSION_KEY" | cut -d: -f3)"
+if [ -n "$TELEGRAM_ID" ] && [ "$TELEGRAM_ID" != "null" ]; then
+  echo "Telegram target linked: $TELEGRAM_ID"
 
-  if [ "$CHANNEL" = "telegram" ]; then
-    case "$SESSION_KEY" in
-      *:direct:*)
-        TELEGRAM_ID="${SESSION_KEY##*:direct:}"
-        ;;
-      *)
-        TELEGRAM_ID=""
-        ;;
-    esac
+  PAYLOAD="$(jq -n \
+    --arg msg "$MESSAGE" \
+    --arg to "$TELEGRAM_ID" \
+    '{
+      message: $msg,
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      deliver: true,
+      channel: "telegram",
+      to: $to
+    }')"
+else
+  echo "Telegram target not linked; sending to main WebChat session only"
 
-    if [ -z "$TELEGRAM_ID" ]; then
-      echo "Skipping malformed Telegram session: $SESSION_KEY"
-      continue
-    fi
+  PAYLOAD="$(jq -n \
+    --arg msg "$MESSAGE" \
+    '{
+      message: $msg,
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      deliver: false
+    }')"
+fi
 
-    PAYLOAD="$(jq -n \
-      --arg msg "$MESSAGE" \
-      --arg key "$SESSION_KEY" \
-      --arg agent "$AGENT_ID" \
-      --arg to "$TELEGRAM_ID" \
-      '{
-        message: $msg,
-        agentId: $agent,
-        sessionKey: $key,
-        deliver: true,
-        channel: "telegram",
-        to: $to
-      }')"
+RESPONSE="$(curl -sS -w "\n%{http_code}" -X POST "$GATEWAY_URL/hooks/agent" \
+  -H "Authorization: Bearer $HOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD" 2>&1)"
+
+HTTP_CODE="$(printf '%s\n' "$RESPONSE" | tail -1)"
+BODY="$(printf '%s\n' "$RESPONSE" | sed '$d')"
+
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ]; then
+  if [ -n "$TELEGRAM_ID" ] && [ "$TELEGRAM_ID" != "null" ]; then
+    echo "Sent to agent:main:main with Telegram target $TELEGRAM_ID"
   else
-    PAYLOAD="$(jq -n \
-      --arg msg "$MESSAGE" \
-      --arg key "$SESSION_KEY" \
-      --arg agent "$AGENT_ID" \
-      '{
-        message: $msg,
-        agentId: $agent,
-        sessionKey: $key,
-        deliver: true
-      }')"
+    echo "Sent to agent:main:main only"
   fi
-
-  RESPONSE="$(curl -sS -w "\n%{http_code}" -X POST "$GATEWAY_URL/hooks/agent" \
-    -H "Authorization: Bearer $HOOK_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" 2>&1)"
-
-  HTTP_CODE="$(printf '%s\n' "$RESPONSE" | tail -1)"
-  BODY="$(printf '%s\n' "$RESPONSE" | sed '$d')"
-
-  if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ]; then
-    echo "Sent to $SESSION_KEY"
-  else
-    echo "Failed to send to $SESSION_KEY HTTP=$HTTP_CODE"
-    [ -n "$BODY" ] && printf '%s\n' "$BODY"
-  fi
-done
+else
+  echo "Failed to send alert HTTP=$HTTP_CODE" >&2
+  [ -n "$BODY" ] && printf '%s\n' "$BODY" >&2
+  exit 1
+fi

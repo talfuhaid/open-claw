@@ -130,21 +130,14 @@ if [ -z "$(ls -A "$WORKSPACE_DIR" 2>/dev/null)" ]; then
   echo "[entrypoint] === END USER.MD SUBSTITUTION DIAGNOSTICS ==="
 fi
 
-# Start Supercronic scheduler if installed.
-# Supercronic runs as the current user, so the container can stay as node.
+# Prepare Supercronic crontab file.
+# The Outlook setup script owns starting/restarting Supercronic after it writes real jobs.
 CRONTAB_FILE="$CONFIG_DIR/crontab"
 
 if [ ! -f "$CRONTAB_FILE" ]; then
   echo "[entrypoint] Creating empty supercronic crontab"
   : > "$CRONTAB_FILE"
   chmod 600 "$CRONTAB_FILE"
-fi
-
-if command -v supercronic >/dev/null 2>&1; then
-  echo "[entrypoint] Starting supercronic with $CRONTAB_FILE"
-  supercronic "$CRONTAB_FILE" &
-else
-  echo "[entrypoint] supercronic not installed; skipping scheduler"
 fi
 
 exec "$@"

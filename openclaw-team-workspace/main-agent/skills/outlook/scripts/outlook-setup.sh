@@ -393,8 +393,11 @@ setup_cron() {
 
     local config_dir="${OPENCLAW_HOME:-$HOME/.openclaw}"
     local crontab_file="$config_dir/crontab"
+    local logs_dir="$config_dir/logs"
+    local supercronic_log="$logs_dir/supercronic.log"
+    local supervisor_pid_file="$config_dir/supercronic-supervisor.pid"
 
-    mkdir -p "$config_dir"
+    mkdir -p "$config_dir" "$logs_dir"
 
     echo -e "${YELLOW}Seeding seen email store${NC}"
     "$TRIAGE_DIR/outlook-seen.sh" seed || {
@@ -426,20 +429,52 @@ setup_cron() {
     echo "Current Supercronic crontab:"
     cat "$crontab_file"
 
-        echo -e "${YELLOW}Restarting Supercronic scheduler${NC}"
+    echo ""
+    echo -e "${YELLOW}Restarting Supercronic scheduler${NC}"
 
-    if command -v supercronic >/dev/null 2>&1; then
-        pkill -x supercronic 2>/dev/null || true
-
-        nohup supercronic "$crontab_file" \
-            >> "$config_dir/logs/supercronic.log" \
-            2>&1 &
-
-        echo -e "${GREEN}✓ Supercronic restarted${NC}"
-    else
+    if ! command -v supercronic >/dev/null 2>&1; then
         echo -e "${YELLOW}⚠ supercronic not installed; jobs will start on next container restart.${NC}"
+        return
     fi
-    }
+
+    # Stop old supervisor if present.
+    if [ -f "$supervisor_pid_file" ]; then
+        old_pid="$(cat "$supervisor_pid_file" 2>/dev/null || true)"
+        if [ -n "${old_pid:-}" ] && kill -0 "$old_pid" 2>/dev/null; then
+            kill "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$supervisor_pid_file"
+    fi
+
+    # Stop any directly running old supercronic process.
+    pkill -x supercronic 2>/dev/null || true
+
+    # Start a small supervisor. If supercronic exits, it comes back.
+    (
+        while true; do
+            echo "$(date '+%Y-%m-%dT%H:%M:%S%z') [supercronic-supervisor] starting supercronic with $crontab_file" >> "$supercronic_log"
+
+            supercronic "$crontab_file" >> "$supercronic_log" 2>&1
+            code="$?"
+
+            echo "$(date '+%Y-%m-%dT%H:%M:%S%z') [supercronic-supervisor] supercronic exited with code $code; restarting in 5s" >> "$supercronic_log"
+            sleep 5
+        done
+    ) &
+
+    echo "$!" > "$supervisor_pid_file"
+    chmod 600 "$supervisor_pid_file"
+
+    sleep 1
+
+    if pgrep -a supercronic >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ Supercronic restarted${NC}"
+        pgrep -a supercronic
+    else
+        echo -e "${YELLOW}⚠ Supercronic supervisor started, but supercronic is not visible yet. Check:${NC}"
+        echo "    $supercronic_log"
+    fi
+}
 
 main() {
     check_prereqs
