@@ -93,7 +93,6 @@ apps/ios/*.mobileprovision
 docs/.local/
 docs/internal/
 tmp/
-IDENTITY.md
 USER.md
 # Exception: oc-path real-world test fixtures need to be tracked even
 # though the bare names match the local-untracked rule above.
