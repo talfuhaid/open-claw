@@ -1,15 +1,11 @@
 ---
 name: microsoft-teams
-description: microsoft teams integration through composio v3 for listing teams, channels, chats, users, messages, and meetings. use when claude needs to work with microsoft teams via composio v3 sdk, especially to read teams data, send or reply to messages, create chats or meetings, or recover from microsoft teams authentication and connected-account issues in composio-based agents.
+description: Microsoft Teams integration through Composio v3 for listing teams, channels, chats, users, messages, and meetings. Use when the agent needs to work with Microsoft Teams via Composio v3 SDK, especially to read teams data, send or reply to messages, create chats or meetings, or manage authentication.
 ---
 
 # Microsoft Teams (Composio v3 SDK)
 
 Use the **current Composio v3 SDK** patterns exclusively.
-
-Do **not** use legacy `ComposioToolSet`, `App`, `entity.initiate_connection(...)`, `Action.*` enums, `toolset.execute_action(...)`, or `composio.actions.execute(...)`.
-
----
 
 ## Required Environment
 
@@ -19,355 +15,124 @@ Do **not** use legacy `ComposioToolSet`, `App`, `entity.initiate_connection(...)
 | `USER_ID`                        | Stable app-side user identifier    |
 | `MICROSOFT_TEAMS_AUTH_CONFIG_ID` | Auth config ID starting with `ac_` |
 
-- Network access required
 - Python venv: `/opt/skills-venv/bin/python3`
-- Python package: `composio` — **not** `composio-core`
+- Python package: `composio`
 
-Use `/opt/skills-venv/bin/python3` for all Python commands.
+IMPORTANT: Team features take time, before commiting to the task, first lets the user know that you are going to do their task, and that this might take some time.
 
-> ❌ Do **not** create `./venv`.  
-> ❌ Do **not** run `pip install` during normal task execution. If `from composio import Composio` fails, report that the Docker image is missing the `composio` package.
+## Get user's timezone
 
----
+Microsoft teams tools via composio return datetime data in UTC, hence always convert responses to user's timezone.
+to get user's tiemzone, run this command:
 
-## Runtime Verification
-
-Before first Teams use in a fresh container, run:
-
-```bash
-/opt/skills-venv/bin/python3 - <<'PY'
+```python
+import json
 import os
-from composio import Composio
-import inspect
+from pathlib import Path
 
-required = [
-    "COMPOSIO_API_KEY",
-    "USER_ID",
-    "MICROSOFT_TEAMS_AUTH_CONFIG_ID",
-]
 
-missing = [name for name in required if not os.environ.get(name)]
-if missing:
-    raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+CONFIG_DIR = Path.home() / ".outlook-mcp"
+CREDS_FILE = CONFIG_DIR / "credentials.json"
+CONFIG_FILE = CONFIG_DIR / "config.json"
 
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
+API = "https://graph.microsoft.com/v1.0/me"
 
-print("has_tools=", hasattr(composio, "tools"))
-print("has_actions=", hasattr(composio, "actions"))
-print("has_connected_accounts=", hasattr(composio, "connected_accounts"))
 
-if not hasattr(composio, "tools"):
-    raise RuntimeError("Installed Composio SDK does not expose composio.tools. Install the `composio` package, not deprecated `composio-core`.")
+def get_timezone() -> str:
+    """
+    Read timezone from ~/.outlook-mcp/config.json.
 
-if not hasattr(composio, "connected_accounts"):
-    raise RuntimeError("Installed Composio SDK does not expose connected_accounts.")
+    Equivalent to:
+      jq -r '.timezone // empty' "$CONFIG_FILE"
 
-for name in ["initiate", "link", "list"]:
-    if hasattr(composio.connected_accounts, name):
-        print(f"connected_accounts.{name}:", inspect.signature(getattr(composio.connected_accounts, name)))
-PY
+    Falls back to UTC if:
+      - config.json does not exist
+      - timezone is missing
+      - timezone is null
+      - timezone is an empty string
+      - JSON is invalid
+    """
+    try:
+        with CONFIG_FILE.open("r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        timezone = config.get("timezone")
+
+        if not timezone:
+            return "UTC"
+
+        return str(timezone)
+
+    except FileNotFoundError:
+        return "UTC"
+    except json.JSONDecodeError:
+        return "UTC"
+    except OSError:
+        return "UTC"
+
+
+TIMEZONE = get_timezone()
+os.environ["TZ"] = TIMEZONE
 ```
 
-Expected output:
+## Runtime Discovery (THIS IS VERY IMPORTANTS, FAILURE TO DO THIS CAN LEAD TO IMPROPER TOOL CALLS, CAUSING INACCURACIES AND LOW EFFICIENCY)
 
-```
-has_tools= True
-has_actions= False
-has_connected_accounts= True
-```
-
-> If `has_actions=True` and `has_tools=False`, the container is using deprecated `composio-core`. Stop and report the image/package mismatch.
-
----
-
-## Concepts
-
-| Term                   | Description                                                          |
-| ---------------------- | -------------------------------------------------------------------- |
-| `auth_config_id`       | Composio auth blueprint for Microsoft Teams. Starts with `ac_`.      |
-| `user_id`              | Stable app-side user identifier, from `USER_ID`.                     |
-| `connected_account_id` | Actual authenticated Teams connection. Starts with `ca_`.            |
-| `chat_id`              | Microsoft Teams chat/conversation target used when sending messages. |
-
-> Use the same `USER_ID` every time for the same human. Changing it will make Composio treat the user as a different account and may require re-authentication.
-
----
-
-## Authentication Workflow
-
-1. Check whether `USER_ID` already has an active Teams connected account.
-2. If an active account exists, reuse its `connected_account_id`.
-3. If no active account exists, call `composio.connected_accounts.link(user_id=..., auth_config_id=...)`.
-4. Send the user **exactly one** redirect URL.
-5. **Wait patiently.** The redirect URL may take several seconds to load — this is normal and expected. Do not regenerate the link or assume failure just because the user has not responded immediately. Only generate a new link if the user explicitly reports the link expired or failed.
-6. Wait for the user to confirm they completed auth, or use `wait_for_connection()` only when the process is expected to block.
-7. Print the `connected_account_id`; do not try to persist it with `os.environ[...]` inside Python.
-
-> ❌ Do not repeatedly generate fresh auth links unless the previous one expired.
-
-### User-Facing Auth Message
-
-```
-Microsoft Teams is not connected in Composio yet.
-
-Please open this link and authorize your Microsoft Teams account:
-<URL>
-
-Note: the page may take a few seconds to load — please be patient.
-Once done, tell me and I'll continue.
-```
-
----
-
-## Python Snippets
-
-### 1. Initialize Client
+Always verify tool parameters via `composio.tools.get` before calling a tool for the first time in a session, as schemas may vary by auth config.
 
 ```python
 import os
 from composio import Composio
 
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-user_id = os.environ["USER_ID"]
-auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
-```
-
-### 2. Check for Existing Active Teams Connection
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-user_id = os.environ["USER_ID"]
-auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
-
-accounts = composio.connected_accounts.list(
-    user_ids=[user_id],
-    auth_config_ids=[auth_config_id],
-    statuses=["ACTIVE"],
-)
-
-active_accounts = list(accounts.items)
-
-if active_accounts:
-    for account in active_accounts:
-        print(f"CONNECTED_ACCOUNT_ID={account.id}")
-        print(f"STATUS={account.status}")
-else:
-    print("NO_ACTIVE_TEAMS_CONNECTION")
-```
-
-### 3. Generate Hosted Auth Link
-
-> Use this **only** if no active connected account exists.
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-user_id = os.environ["USER_ID"]
-auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
-
-connection_request = composio.connected_accounts.link(
-    user_id=user_id,
-    auth_config_id=auth_config_id,
-)
-
-print(f"AUTH_URL={connection_request.redirect_url}")
-```
-
-Send the printed `AUTH_URL` to the user.
-
-### 4. Wait for Connection (Blocking)
-
-> Only use this if it is acceptable for the process to block while the user authorizes.
-
-```python
-import os
-from composio import Composio
-
-# The redirect page may take several seconds to load — this is expected.
-# Do not re-initiate auth unless the user confirms the link failed or expired.
-connected_account = connection_request.wait_for_connection(timeout=120)  # give it time
-connected_account_id = getattr(connected_account, "id", "")
-
-if not connected_account_id:
-    raise RuntimeError("Connection completed, but no connected account ID was returned.")
-
-print(f"CONNECTED_ACCOUNT_ID={connected_account_id}")
-```
-
-### 5. Re-List Accounts After User Confirms Auth
-
-> Use this when the user says they completed the auth link.
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-user_id = os.environ["USER_ID"]
-auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
-
-accounts = composio.connected_accounts.list(
-    user_ids=[user_id],
-    auth_config_ids=[auth_config_id],
-    statuses=["ACTIVE"],
-)
-
-for account in accounts.items:
-    print(f"CONNECTED_ACCOUNT_ID={account.id}")
-    print(f"STATUS={account.status}")
-```
-
-### 6. Execute a Tool
-
-All tool calls use string slugs, `user_id`, `connected_account_id`, and `arguments`.
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-
-result = composio.tools.execute(
-    "MICROSOFT_TEAMS_GET_MY_PROFILE",
-    user_id=os.environ["USER_ID"],
-    connected_account_id="ca_...",
-    arguments={},
-    dangerously_skip_version_check=True,
-)
-
-print(result)
-```
-
----
-
-## Key Tool Slugs
-
-| Slug                                         | Description                                  |
-| -------------------------------------------- | -------------------------------------------- |
-| `MICROSOFT_TEAMS_GET_MY_PROFILE`             | Verify current Teams user                    |
-| `MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS`        | List recent chats                            |
-| `MICROSOFT_TEAMS_CHATS_GET_ALL_MESSAGES`     | Fetch messages — requires `chat_id`          |
-| `MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE`    | Send message — requires `chat_id`, `content` |
-| `MICROSOFT_TEAMS_TEAMS_CREATE_CHAT`          | Create chat                                  |
-| `MICROSOFT_TEAMS_TEAMS_POST_CHANNEL_MESSAGE` | Post message to channel                      |
-
-### Discover Tool Slugs at Runtime
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-user_id = os.environ["USER_ID"]
-
+composio = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
 tools = composio.tools.get(
-    user_id=user_id,
-    toolkits=["microsoft_teams"],
+    user_id=os.environ["USER_ID"],
+    tools=["MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE"]
 )
-
-for tool in tools:
-    if isinstance(tool, dict):
-        print(tool.get("function", {}).get("name", tool))
-    else:
-        print(tool)
+print(tools[0].parameters)
 ```
 
-If object fields differ, inspect safely with:
-
-```python
-print(type(tool))
-print(tool)
-print(dir(tool))
-```
-
-> ❌ Do not assume toolkit objects have an `.id` field.
-
----
-
-## Read-Only Actions
-
-No confirmation required:
-
-- `MICROSOFT_TEAMS_GET_MY_PROFILE`
-- `MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS`
-- `MICROSOFT_TEAMS_CHATS_GET_ALL_MESSAGES`
-
-## User-Visible Actions
-
-Require **explicit confirmation** before execution:
-
-- `MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE`
-- `MICROSOFT_TEAMS_TEAMS_POST_CHANNEL_MESSAGE`
-- `MICROSOFT_TEAMS_TEAMS_CREATE_CHAT`
-
-### Confirmation Format
-
-```
-Before I proceed, please confirm:
-
-Action: [what you are about to do]
-To: [recipient / chat / channel / team]
-Message: "[message content if applicable]"
-
-Reply yes to confirm or no to cancel.
-```
-
----
-
-## Messaging Workflow
-
-1. Check active connected account.
-2. Get or confirm `connected_account_id`.
-3. Search for existing 1:1 chat via `MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS`.
-4. If the user name matches a known chat, reuse that `chat_id`.
-5. Ask for confirmation with the final message text.
-6. Send only after explicit approval via `MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE`.
-
-### Send Chat Message
+Authentication Workflow
+Check for active Teams connected account.
+If none, generate a hosted auth link.
+Send the link to the user and wait for confirmation.
+Copy
 
 ```python
 import os
 from composio import Composio
 
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
+composio = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
+user_id = os.environ["USER_ID"]
+auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
+
+# Check status
+accounts = composio.connected_accounts.list(
+    user_ids=[user_id],
+    auth_config_ids=[auth_config_id],
+    statuses=["ACTIVE"],
 )
 
+if not accounts.items:
+    # Link new account
+    connection_request = composio.connected_accounts.link(
+        user_id=user_id,
+        auth_config_id=auth_config_id,
+    )
+    print(f"AUTH_URL={connection_request.redirect_url}")
+else:
+    print(f"CONNECTED_ACCOUNT_ID={accounts.items[0].id}")
+```
+
+Messaging Workflow
+Verify Connection: Ensure connected_account_id is active.
+Find Target: Use MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS to find a chat_id.
+Get Confirmation: Always ask the user to confirm the recipient and message content.
+Execute: Use composio.tools.execute.
+
+Send Chat Message
+Copy
+
+```python
 result = composio.tools.execute(
     "MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE",
     user_id=os.environ["USER_ID"],
@@ -375,99 +140,186 @@ result = composio.tools.execute(
     arguments={
         "chat_id": "...",
         "content": "Hello World",
+        "content_type": "text" # or 'html'
     },
     dangerously_skip_version_check=True,
 )
-
-print(result)
 ```
 
-### Find an Existing Chat
-
-> Prefer reusing existing chats before creating a new one.
-
-```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-
-result = composio.tools.execute(
-    "MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS",
-    user_id=os.environ["USER_ID"],
-    connected_account_id="ca_...",
-    arguments={},
-    dangerously_skip_version_check=True,
-)
-
-print(result)
-```
-
-### Create a Chat
-
-> Create a chat only after confirmation if no suitable chat exists.
+Create Chat (Note Parameter Naming)
+Copy
 
 ```python
-import os
-from composio import Composio
-
-composio = Composio(
-    api_key=os.environ["COMPOSIO_API_KEY"],
-    timeout=30,
-    max_retries=1,
-)
-
 result = composio.tools.execute(
     "MICROSOFT_TEAMS_TEAMS_CREATE_CHAT",
     user_id=os.environ["USER_ID"],
     connected_account_id="ca_...",
     arguments={
-        "chatType": "oneOnOne",
+        "chatType": "oneOnOne", # or 'group'
         "members": [
             {
-                "user_odata_bind": "https://graph.microsoft.com/v1.0/users/<my-user-id>",
-                "roles": ["owner"],
+                "userOdataBind": "https://graph.microsoft.com/v1.0/users/me",
+                "roles": ["owner"]
             },
             {
-                "user_odata_bind": "https://graph.microsoft.com/v1.0/users/<target-user-id>",
-                "roles": ["owner"],
-            },
-        ],
+                "userOdataBind": "https://graph.microsoft.com/v1.0/users/target@example.com",
+                "roles": ["owner"]
+            }
+        ]
     },
     dangerously_skip_version_check=True,
 )
-
-print(result)
 ```
 
----
+Finding Messages Workflow
+For general requests about the most recent message, `lastUpdatedDateTime` is returning inaccurate data, hence the code below calls the microsoft API directly.
+Use this over MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS with `lastUpdatedDateTime`.
+
+Most Resent Message
+
+```python
+import os
+import json
+import requests
+from composio import Composio
+from datetime import datetime, timedelta, timezone
+
+TIMEZONE_NAME = "Asia/Calcutta"
+TZ_INFO = timezone(timedelta(hours=5, minutes=30))
+
+composio = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
+user_id = os.environ["USER_ID"]
+auth_config_id = os.environ["MICROSOFT_TEAMS_AUTH_CONFIG_ID"]
+
+accounts = composio.connected_accounts.list(
+    user_ids=[user_id],
+    auth_config_ids=[auth_config_id],
+    statuses=["ACTIVE"],
+)
+
+if not accounts.items:
+    print(json.dumps({"error": "No active Teams connection found"}))
+    raise SystemExit(1)
+
+ca_id = accounts.items[0].id
+account = composio.connected_accounts.get(ca_id)
+
+state_val = account.state.val if account.state else {}
+state_dict = state_val.model_dump() if hasattr(state_val, "model_dump") else state_val
+
+access_token = (
+    state_dict.get("access_token")
+    or state_dict.get("accessToken")
+    or state_dict.get("token")
+)
+
+if not access_token:
+    print(json.dumps({
+        "error": "No access token found",
+        "available_keys": list(state_dict.keys()) if isinstance(state_dict, dict) else [],
+    }))
+    raise SystemExit(1)
+
+response = requests.get(
+    "https://graph.microsoft.com/v1.0/me/chats",
+    headers={
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    },
+    params={
+        "$expand": "lastMessagePreview",
+        "$orderby": "lastMessagePreview/createdDateTime desc",
+        "$top": "5",
+    },
+    timeout=30,
+)
+
+if not response.ok:
+    print(json.dumps({
+        "error": "Graph request failed",
+        "status_code": response.status_code,
+        "body": response.text,
+    }))
+    raise SystemExit(1)
+
+data = response.json()
+chats = data.get("value", [])
+
+if not chats:
+    print(json.dumps({"status": "no_chats_returned"}))
+    raise SystemExit(0)
+
+chat = chats[0]
+preview = chat.get("lastMessagePreview")
+
+if not preview or not preview.get("createdDateTime"):
+    print(json.dumps({
+        "status": "no_lastMessagePreview",
+        "chat_keys": list(chat.keys()),
+        "chat": chat,
+    }))
+    raise SystemExit(0)
+
+utc_dt = datetime.fromisoformat(preview["createdDateTime"].replace("Z", "+00:00"))
+local_dt = utc_dt.astimezone(TZ_INFO)
+
+print(json.dumps({
+    "status": "success",
+    "from": preview.get("from", {}).get("user", {}).get("displayName"),
+    "body": preview.get("body", {}).get("content"),
+    "time": local_dt.strftime("%Y-%m-%d %I:%M %p"),
+    "topic": chat.get("topic") or "Direct Chat",
+    "chat_id": chat.get("id"),
+}, ensure_ascii=False))
+```
+
+## Key Tool Slugs
+
+| Slug                                         | Description                                |
+| -------------------------------------------- | ------------------------------------------ |
+| `MICROSOFT_TEAMS_GET_MY_PROFILE`             | Get current user profile (ID, email, etc.) |
+| `MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS`        | List recent chats                          |
+| `MICROSOFT_TEAMS_CHATS_GET_ALL_MESSAGES`     | Fetch messages from a chat (`chat_id`)     |
+| `MICROSOFT_TEAMS_TEAMS_POST_CHAT_MESSAGE`    | Send message to a chat                     |
+| `MICROSOFT_TEAMS_TEAMS_CREATE_CHAT`          | Create a new chat                          |
+| `MICROSOFT_TEAMS_TEAMS_POST_CHANNEL_MESSAGE` | Post message to a channel                  |
+| `MICROSOFT_TEAMS_LIST_ASSOCIATED_TEAMS`      | List all teams user is associated with     |
+| `MICROSOFT_TEAMS_GET_CHANNEL`                | Get details of a specific channel          |
+| `MICROSOFT_TEAMS_TEAMS_LIST_CHANNELS`        | List all channels in a team                |
+| `MICROSOFT_TEAMS_GET_PRESENCE`               | Get a user's presence status               |
+| `MICROSOFT_TEAMS_SET_PRESENCE`               | Set current user's presence                |
+| `MICROSOFT_TEAMS_CREATE_MEETING`             | Create an online meeting                   |
 
 ## Failure Handling
 
-| Symptom                                           | Cause                    | Fix                                                                            |
-| ------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------ |
-| `COMPOSIO_API_KEY` missing                        | env not set              | Set `COMPOSIO_API_KEY`                                                         |
-| `USER_ID` missing                                 | env not set              | Set stable user ID, e.g. `openclaw_ubaig`                                      |
-| `MICROSOFT_TEAMS_AUTH_CONFIG_ID` missing          | env not set              | Set Teams auth config ID starting with `ac_`                                   |
-| `ModuleNotFoundError: No module named 'composio'` | image missing package    | Install `composio` into `/opt/skills-venv`; do not install `composio-core`     |
-| `has_tools=False`                                 | deprecated SDK installed | Replace `composio-core` with `composio`                                        |
-| No active account                                 | user not authenticated   | Generate one auth link with `connected_accounts.link(...)`                     |
-| Tool call rejected due to version                 | toolkit version mismatch | Pass `dangerously_skip_version_check=True`                                     |
-| Missing fields                                    | SDK/tool schema changed  | Inspect object safely; use `content` for message body and `chat_id` for target |
-
----
+| Symptom               | Cause                         | Fix                                                                         |
+| --------------------- | ----------------------------- | --------------------------------------------------------------------------- |
+| `InvalidParams`       | Mismatched argument names     | Run `composio.tools.get` to verify the exact schema (e.g. `userOdataBind`). |
+| `401 Unauthorized`    | Expired or missing connection | Re-run the Authentication Workflow to generate a new link.                  |
+| `403 Forbidden`       | Missing Graph permissions     | Check if the app has the required scopes (e.g. `Chat.ReadWrite`).           |
+| Tool version mismatch | SDK versioning                | Pass `dangerously_skip_version_check=True` in `execute`.                    |
+| `chat_id` not found   | Stale cache or wrong ID       | Re-list chats using `MICROSOFT_TEAMS_CHATS_GET_ALL_CHATS`.                  |
 
 ## Do Not Do These
 
-- ❌ Do not use `Action.MICROSOFTTEAMS_*` enums
-- ❌ Do not use `toolset.execute_action(...)`
-- ❌ Do not use `composio.actions.execute(...)`
-- ❌ Do not create `./venv`
-- ❌ Do not run `pip install` during normal task execution
-- ❌ Do not open multiple auth links unnecessarily
-- ❌ Do not silently send messages or create chats without confirmation
-- ❌ Do not assume SDK list items have `.id` — use `print(item)`, `dir(item)`, or `getattr(item, "id", None)` if inspection is needed
+- ❌ Do not use legacy `ComposioToolSet` or `Action` enums.
+- ❌ Do not use snake_case for OData binding fields if the schema shows camelCase (e.g. use `userOdataBind`).
+- ❌ Do not create a new chat if an existing `oneOnOne` chat can be found.
+- ❌ Do not send messages or create meetings without explicit user confirmation.
+- ❌ Do not assume all 169 tools are available; always check `toolkits=["microsoft_teams"]`.
+- ❌ Do not treat datetime retrieved from teams tool responses as user's timezone (they always respond in UTC), check user's timezone then convert to their timezone.
+
+## Safety & Confirmations
+
+**Read-only actions (No confirmation):**
+
+- Listing chats/messages/teams.
+- Getting profiles.
+
+**User-visible actions (Confirmation REQUIRED):**
+
+- Posting messages (chat or channel).
+- Creating chats or teams.
+- Updating status/presence.
+
+Ask: "Action: [Action] | To: [Recipient] | Message: [Content]. Confirm?"

@@ -219,7 +219,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 RUN python3 -m venv /opt/skills-venv \
     && /opt/skills-venv/bin/pip install --no-cache-dir \
         websockets \
-        composio
+        composio==0.13.1
 
 ENV PATH="/opt/skills-venv/bin:$PATH"
 

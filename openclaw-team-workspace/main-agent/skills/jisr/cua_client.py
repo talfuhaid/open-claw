@@ -641,19 +641,19 @@ async def run_cua_task(
 ) -> Dict[str, Any]:
     ws_url = os.getenv(
         "CUA_SERVICE_WEBSOCKET",
-        "wss://dev.burhan.nabeh.ai/cua-service/ws/run-agent",  # local: f"ws://{host}:{port}/ws/run-agent"
+        f"ws://{host}:{port}/ws/run-agent"
     )
     browser_service_url = os.getenv(
         "BROWSER_SERVICE_URL",
-        "https://dev.burhan.nabeh.ai",  # local: f"http://{host}:7002"
+        f"http://{host}:7002"
     )
     orchestrator_url = os.getenv(
         "CUA_ORCHESTRATOR_URL",
-        "https://dev.burhan.nabeh.ai/orchestrator",  # local: f"http://{host}:9000"
+        f"http://{host}:9000"
     )
     cua_health_url = os.getenv(
         "CUA_HEALTH_URL",
-        "https://dev.burhan.nabeh.ai/cua-service/health",  # local: f"http://{host}:{port}/health"
+        f"http://{host}:{port}/health"
     )
 
     # --- Service health pre-check ---
