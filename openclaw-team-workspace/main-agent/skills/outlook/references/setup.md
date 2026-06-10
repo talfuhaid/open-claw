@@ -87,7 +87,7 @@ Follow this path if:
    - **Name:** `Clawdbot-Outlook` (or any name)
    - **Supported account types:** _Accounts in any organizational directory
      and personal Microsoft accounts_
-   - **Redirect URI:** Platform = Web, URI = `http://localhost:54321`
+   - **Redirect URI:** Platform = Web, URI = `http://localhost`
 5. Click **Register**
 
 ### B.2 Get client credentials
@@ -160,14 +160,17 @@ chmod 600 ~/.outlook-mcp/config.json
 Build the authorization URL (replace `YOUR_CLIENT_ID`):
 
 ```
-https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost:54321&scope=https://graph.microsoft.com/Mail.ReadWrite%20https://graph.microsoft.com/Mail.Send%20https://graph.microsoft.com/Calendars.ReadWrite%20https://graph.microsoft.com/MailboxSettings.Read%20https://graph.microsoft.com/User.ReadBasic.All%20offline_access&response_mode=query
+https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost&scope=https://graph.microsoft.com/Mail.ReadWrite%20https://graph.microsoft.com/Mail.Send%20https://graph.microsoft.com/Calendars.ReadWrite%20https://graph.microsoft.com/MailboxSettings.Read%20https://graph.microsoft.com/User.ReadBasic.All%20offline_access&response_mode=query
 ```
 
 1. Open the provided URL in your browser.
 2. Sign in with your Microsoft account (MFA may be required, especially from a new network location).
 3. Grant the requested permissions.
-4. Once you are redirected to the success page, click the "Copy Redirect URL" button.
-5. Paste that copied URL back here in our chat.
+4. You'll be redirected to `http://localhost?code=XXXXX...`
+   (the browser may show a connection error — expected, the URL bar has
+   what you need).
+5. Copy the full final URL from the browser address bar and paste it back
+   into the setup prompt.
 
 ---
 
@@ -183,7 +186,7 @@ curl -s -X POST "https://login.microsoftonline.com/common/oauth2/v2.0/token" \
   --data-urlencode "client_id=$CLIENT_ID" \
   --data-urlencode "client_secret=$CLIENT_SECRET" \
   --data-urlencode "code=$AUTH_CODE" \
-  --data-urlencode "redirect_uri=http://localhost:54321" \
+  --data-urlencode "redirect_uri=http://localhost" \
   --data-urlencode "grant_type=authorization_code" \
   --data-urlencode "scope=https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.ReadBasic.All offline_access" \
   > ~/.outlook-mcp/credentials.json
@@ -311,6 +314,12 @@ the refreshed tokens will be bound to the new location.
 Re-run Step 3. Make sure you click _Accept_ on the consent screen. If
 scopes were recently added to the shared app, even already-authorized
 users need to re-consent.
+
+**`AADSTS65004: User declined to consent to access the app`**
+Microsoft returned a declined consent response instead of an authorization
+code. Re-run Step 3 and click _Accept_. If this only happens for a
+work/school account, the tenant may block user consent and require a
+Microsoft 365 admin to approve the app permissions.
 
 **`403 Forbidden` on `/me/mailboxSettings/timeZone`**
 `MailboxSettings.Read` was not consented. Re-run the authorize URL — the

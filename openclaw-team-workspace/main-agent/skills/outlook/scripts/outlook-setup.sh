@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/outlook-setup.sh
-#   ./scripts/outlook-setup.sh 'http://localhost:54321/?code=...&session_state=...'
+#   ./scripts/outlook-setup.sh 'http://localhost/?code=...&session_state=...'
 
 set -euo pipefail
 
@@ -27,8 +27,7 @@ else
 fi
 
 APP_NAME="Clawdbot-Outlook"
-REDIRECT_PORT="54321"
-REDIRECT_URI="http://localhost:$REDIRECT_PORT"
+REDIRECT_URI="http://localhost"
 SCOPES="https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.ReadBasic.All offline_access"
 
 RED='\033[0;31m'
@@ -271,63 +270,30 @@ authorize() {
         echo ""
         echo -e "${BLUE}$AUTH_URL${NC}"
         echo ""
-
-        # Try to start the callback server if Python 3 is available
-        SERVER_PID=""
-        TEMP_FILE=""
-        if command -v python3 >/dev/null 2>&1; then
-            TEMP_FILE="$(mktemp)"
-            # Start the callback server in the background
-            python3 "$SCRIPT_DIR/oauth-callback-server.py" "$REDIRECT_PORT" > "$TEMP_FILE" 2>/dev/null &
-            SERVER_PID=$!
-
-            # Setup trap to clean up the background server on exit
-            trap 'kill $SERVER_PID 2>/dev/null || true; rm -f "$TEMP_FILE"' EXIT
-
-            echo "Waiting for authorization callback on http://localhost:$REDIRECT_PORT/..."
-            echo "Or, if you are running in a headless environment, copy the redirect URL and paste it below."
-            echo ""
-
-            # Loop to poll the temp file or accept user input
-            while [ -z "$REDIRECT_URL" ]; do
-                # Check if server wrote the URL
-                if [ -s "$TEMP_FILE" ]; then
-                    REDIRECT_URL="$(cat "$TEMP_FILE")"
-                    echo -e "${GREEN}✓ Captured redirect URL automatically.${NC}"
-                    break
-                fi
-
-                # Check if server died (e.g., port already bound)
-                if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                    echo -e "${YELLOW}⚠ Callback server could not start (port $REDIRECT_PORT may be in use or python error).${NC}"
-                    echo "Please authorize in the browser, copy the redirect URL, and paste it here:"
-                    echo ""
-                    read -r -p "URL: " REDIRECT_URL
-                    break
-                fi
-
-                # Non-blocking check for user input (timeout 1s)
-                if read -t 1 -r -p "URL (optional): " manual_url; then
-                    if [ -n "$manual_url" ]; then
-                        REDIRECT_URL="$manual_url"
-                        break
-                    fi
-                fi
-            done
-
-            # Clean up server
-            kill "$SERVER_PID" 2>/dev/null || true
-            rm -f "$TEMP_FILE"
-            # Reset trap
-            trap - EXIT
-        else
-            echo "After authorizing, you will be redirected to a page that may not load."
-            echo "Copy the FULL URL from the address bar and paste it here:"
-            echo ""
-            read -r -p "URL: " REDIRECT_URL
-        fi
+        echo "After authorizing, you will be redirected to a page that may not load."
+        echo "Copy the FULL URL from the address bar and paste it here:"
+        echo ""
+        read -r -p "URL: " REDIRECT_URL
     else
         echo "Using redirect URL passed as argument."
+    fi
+
+    OAUTH_ERROR="$(printf '%s' "$REDIRECT_URL" | grep -oP 'error=\K[^&]+' || true)"
+    if [ -n "$OAUTH_ERROR" ]; then
+        ERROR_DESCRIPTION="$(printf '%s' "$REDIRECT_URL" | grep -oP 'error_description=\K[^&]+' || true)"
+        if [ -n "$ERROR_DESCRIPTION" ] && command -v python3 >/dev/null 2>&1; then
+            ERROR_DESCRIPTION="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.argv[1]))' "$ERROR_DESCRIPTION")"
+        fi
+
+        echo -e "${RED}Microsoft did not grant Outlook access.${NC}"
+        echo "Error: $OAUTH_ERROR"
+        if [ -n "$ERROR_DESCRIPTION" ]; then
+            echo "Reason: $ERROR_DESCRIPTION"
+        fi
+        echo ""
+        echo "Open the authorization link again and click Accept."
+        echo "If this is a work/school account, your Microsoft 365 admin may need to approve the app permissions."
+        exit 1
     fi
 
     AUTH_CODE="$(printf '%s' "$REDIRECT_URL" | grep -oP 'code=\K[^&]+' || true)"
@@ -336,6 +302,8 @@ authorize() {
         echo -e "${RED}Could not extract authorization code from URL${NC}"
         echo "Received URL was:"
         printf '%s\n' "$REDIRECT_URL"
+        echo ""
+        echo "Copy the final URL from the browser address bar and paste it into this setup prompt."
         exit 1
     fi
 
