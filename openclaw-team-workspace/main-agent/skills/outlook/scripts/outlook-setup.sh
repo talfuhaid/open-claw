@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/outlook-setup.sh
-#   ./scripts/outlook-setup.sh 'http://localhost/?code=...&session_state=...'
+#   ./scripts/outlook-setup.sh 'http://localhost:54321/?code=...&session_state=...'
 
 set -euo pipefail
 
@@ -27,7 +27,8 @@ else
 fi
 
 APP_NAME="Clawdbot-Outlook"
-REDIRECT_URI="http://localhost"
+REDIRECT_PORT="54321"
+REDIRECT_URI="http://localhost:$REDIRECT_PORT"
 SCOPES="https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.ReadBasic.All offline_access"
 
 RED='\033[0;31m'
@@ -270,10 +271,61 @@ authorize() {
         echo ""
         echo -e "${BLUE}$AUTH_URL${NC}"
         echo ""
-        echo "After authorizing, you will be redirected to a page that may not load."
-        echo "Copy the FULL URL from the address bar and paste it here:"
-        echo ""
-        read -r -p "URL: " REDIRECT_URL
+
+        # Try to start the callback server if Python 3 is available
+        SERVER_PID=""
+        TEMP_FILE=""
+        if command -v python3 >/dev/null 2>&1; then
+            TEMP_FILE="$(mktemp)"
+            # Start the callback server in the background
+            python3 "$SCRIPT_DIR/oauth-callback-server.py" "$REDIRECT_PORT" > "$TEMP_FILE" 2>/dev/null &
+            SERVER_PID=$!
+
+            # Setup trap to clean up the background server on exit
+            trap 'kill $SERVER_PID 2>/dev/null || true; rm -f "$TEMP_FILE"' EXIT
+
+            echo "Waiting for authorization callback on http://localhost:$REDIRECT_PORT/..."
+            echo "Or, if you are running in a headless environment, copy the redirect URL and paste it below."
+            echo ""
+
+            # Loop to poll the temp file or accept user input
+            while [ -z "$REDIRECT_URL" ]; do
+                # Check if server wrote the URL
+                if [ -s "$TEMP_FILE" ]; then
+                    REDIRECT_URL="$(cat "$TEMP_FILE")"
+                    echo -e "${GREEN}✓ Captured redirect URL automatically.${NC}"
+                    break
+                fi
+
+                # Check if server died (e.g., port already bound)
+                if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                    echo -e "${YELLOW}⚠ Callback server could not start (port $REDIRECT_PORT may be in use or python error).${NC}"
+                    echo "Please authorize in the browser, copy the redirect URL, and paste it here:"
+                    echo ""
+                    read -r -p "URL: " REDIRECT_URL
+                    break
+                fi
+
+                # Non-blocking check for user input (timeout 1s)
+                if read -t 1 -r -p "URL (optional): " manual_url; then
+                    if [ -n "$manual_url" ]; then
+                        REDIRECT_URL="$manual_url"
+                        break
+                    fi
+                fi
+            done
+
+            # Clean up server
+            kill "$SERVER_PID" 2>/dev/null || true
+            rm -f "$TEMP_FILE"
+            # Reset trap
+            trap - EXIT
+        else
+            echo "After authorizing, you will be redirected to a page that may not load."
+            echo "Copy the FULL URL from the address bar and paste it here:"
+            echo ""
+            read -r -p "URL: " REDIRECT_URL
+        fi
     else
         echo "Using redirect URL passed as argument."
     fi
