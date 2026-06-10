@@ -160,17 +160,15 @@ chmod 600 ~/.outlook-mcp/config.json
 Build the authorization URL (replace `YOUR_CLIENT_ID`):
 
 ```
-https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost&scope=https://graph.microsoft.com/Mail.ReadWrite%20https://graph.microsoft.com/Mail.Send%20https://graph.microsoft.com/Calendars.ReadWrite%20https://graph.microsoft.com/MailboxSettings.Read%20https://graph.microsoft.com/User.ReadBasic.All%20offline_access&response_mode=query
+https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http%3A%2F%2Flocalhost&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMail.Send%20https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read%20https%3A%2F%2Fgraph.microsoft.com%2FUser.ReadBasic.All%20offline_access
 ```
 
 1. Open the provided URL in your browser.
 2. Sign in with your Microsoft account (MFA may be required, especially from a new network location).
 3. Grant the requested permissions.
-4. You'll be redirected to `http://localhost?code=XXXXX...`
-   (the browser may show a connection error — expected, the URL bar has
-   what you need).
-5. Copy the full final URL from the browser address bar and paste it back
-   into the setup prompt.
+4. You'll be redirected to the Outlook connection page.
+5. Click **Copy Redirect URL**, then paste the copied URL back into the
+   setup prompt.
 
 ---
 
@@ -320,6 +318,11 @@ Microsoft returned a declined consent response instead of an authorization
 code. Re-run Step 3 and click _Accept_. If this only happens for a
 work/school account, the tenant may block user consent and require a
 Microsoft 365 admin to approve the app permissions.
+
+**`AADSTS700079: unsupported mode 'query?' when requesting a token`**
+The authorization URL was malformed, usually because an extra `?` was
+appended after `response_mode=query`. The setup flow omits `response_mode`
+because Microsoft defaults to query mode for authorization-code responses.
 
 **`403 Forbidden` on `/me/mailboxSettings/timeZone`**
 `MailboxSettings.Read` was not consented. Re-run the authorize URL — the

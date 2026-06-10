@@ -261,7 +261,10 @@ authorize() {
     echo -e "${YELLOW}User Authorization${NC}"
     echo ""
 
-    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=$REDIRECT_URI&scope=$(printf '%s' "$SCOPES" | sed 's/ /%20/g')&response_mode=query"
+    ENCODED_CLIENT_ID="$(jq -rn --arg v "$CLIENT_ID" '$v|@uri')"
+    ENCODED_REDIRECT_URI="$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')"
+    ENCODED_SCOPES="$(jq -rn --arg v "$SCOPES" '$v|@uri')"
+    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$ENCODED_CLIENT_ID&response_type=code&redirect_uri=$ENCODED_REDIRECT_URI&scope=$ENCODED_SCOPES"
 
     REDIRECT_URL="${1:-}"
 
@@ -270,8 +273,8 @@ authorize() {
         echo ""
         echo -e "${BLUE}$AUTH_URL${NC}"
         echo ""
-        echo "After authorizing, you will be redirected to a page that may not load."
-        echo "Copy the FULL URL from the address bar and paste it here:"
+        echo "After authorizing, click Copy Redirect URL on the Outlook connection page."
+        echo "Paste the copied URL here:"
         echo ""
         read -r -p "URL: " REDIRECT_URL
     else
