@@ -261,7 +261,10 @@ authorize() {
     echo -e "${YELLOW}User Authorization${NC}"
     echo ""
 
-    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=$REDIRECT_URI&scope=$(printf '%s' "$SCOPES" | sed 's/ /%20/g')&response_mode=query"
+    ENCODED_CLIENT_ID="$(jq -rn --arg v "$CLIENT_ID" '$v|@uri')"
+    ENCODED_REDIRECT_URI="$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')"
+    ENCODED_SCOPES="$(jq -rn --arg v "$SCOPES" '$v|@uri')"
+    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$ENCODED_CLIENT_ID&response_type=code&redirect_uri=$ENCODED_REDIRECT_URI&scope=$ENCODED_SCOPES"
 
     REDIRECT_URL="${1:-}"
 
@@ -270,12 +273,30 @@ authorize() {
         echo ""
         echo -e "${BLUE}$AUTH_URL${NC}"
         echo ""
-        echo "After authorizing, you will be redirected to a page that may not load."
-        echo "Copy the FULL URL from the address bar and paste it here:"
+        echo "After authorizing, click Copy Redirect URL on the Outlook connection page."
+        echo "Paste the copied URL here:"
         echo ""
         read -r -p "URL: " REDIRECT_URL
     else
         echo "Using redirect URL passed as argument."
+    fi
+
+    OAUTH_ERROR="$(printf '%s' "$REDIRECT_URL" | grep -oP 'error=\K[^&]+' || true)"
+    if [ -n "$OAUTH_ERROR" ]; then
+        ERROR_DESCRIPTION="$(printf '%s' "$REDIRECT_URL" | grep -oP 'error_description=\K[^&]+' || true)"
+        if [ -n "$ERROR_DESCRIPTION" ] && command -v python3 >/dev/null 2>&1; then
+            ERROR_DESCRIPTION="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.argv[1]))' "$ERROR_DESCRIPTION")"
+        fi
+
+        echo -e "${RED}Microsoft did not grant Outlook access.${NC}"
+        echo "Error: $OAUTH_ERROR"
+        if [ -n "$ERROR_DESCRIPTION" ]; then
+            echo "Reason: $ERROR_DESCRIPTION"
+        fi
+        echo ""
+        echo "Open the authorization link again and click Accept."
+        echo "If this is a work/school account, your Microsoft 365 admin may need to approve the app permissions."
+        exit 1
     fi
 
     AUTH_CODE="$(printf '%s' "$REDIRECT_URL" | grep -oP 'code=\K[^&]+' || true)"
@@ -284,6 +305,8 @@ authorize() {
         echo -e "${RED}Could not extract authorization code from URL${NC}"
         echo "Received URL was:"
         printf '%s\n' "$REDIRECT_URL"
+        echo ""
+        echo "Copy the final URL from the browser address bar and paste it into this setup prompt."
         exit 1
     fi
 
