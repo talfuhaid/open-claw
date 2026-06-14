@@ -331,7 +331,7 @@ Access tokens expire after ~1 hour. Refresh with:
 If you feel the user wants you to send an email, do these:
 
 1. If user provides just names or designations (not email addresses) and you don't know their email addresses, first lookup their email address, if you find multiple matching email address and are not sure which one they are referring to, always clarify with them by showing the email addresses. (obviously, if the names doesn't match, don't raise, like Tala is not same as Talal)
-2. Create a draft using `draft`, `reply-draft`, `draft-attachment`, or `reply-draft-attachment` — include cc/bcc if relevant
+2. Create a draft using `draft`, `reply-draft`, `draft-attachment`, or `reply-draft-attachment` (if the draft being created is a reply draft, its a must to include all cc/ bcc fields as original email, unless stated otherwise by user).
 3. If you feel the request follows a previous email exchange or references an existing thread, use `reply-draft` or `reply-draft-attachment` to keep the message chained in the thread.
 4. Show the draft details to the user for confirmation (to, cc, bcc, attachments, subject, body)
 5. ONLY when user confirms, send via `send-draft`.
