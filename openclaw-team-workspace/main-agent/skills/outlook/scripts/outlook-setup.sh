@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.outlook-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CREDS_FILE="$CONFIG_DIR/credentials.json"
+BACKEND_AUTH_URL="${OUTLOOK_CONNECT_URL:-${OUTLOOK_BACKEND_AUTH_URL:-}}"
 
 # Try to find the triage Outlook skill in common workspace locations.
 if [ -d "$HOME/workspace/outlook-traige-agent/skills/outlook" ]; then
@@ -28,6 +29,7 @@ fi
 
 APP_NAME="Clawdbot-Outlook"
 REDIRECT_URI="http://localhost"
+LOCALHOST_INDEX="${OUTLOOK_LOCALHOST_INDEX:-/var/www/html/index.html}"
 SCOPES="https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.ReadBasic.All offline_access"
 
 RED='\033[0;31m'
@@ -82,6 +84,37 @@ check_existing_creds() {
     fi
 
     return 1
+}
+
+has_outlook_tokens() {
+    if [ ! -f "$CREDS_FILE" ]; then
+        return 1
+    fi
+
+    local access_token refresh_token
+    access_token="$(jq -r '.access_token // empty' "$CREDS_FILE" 2>/dev/null || true)"
+    refresh_token="$(jq -r '.refresh_token // empty' "$CREDS_FILE" 2>/dev/null || true)"
+
+    [ -n "$access_token" ] && [ -n "$refresh_token" ]
+}
+
+use_backend_authorization_if_configured() {
+    if [ -z "$BACKEND_AUTH_URL" ]; then
+        return 1
+    fi
+
+    if has_outlook_tokens; then
+        return 1
+    fi
+
+    echo -e "${YELLOW}Outlook is not connected yet.${NC}"
+    echo "Open this URL in your browser:"
+    echo ""
+    echo -e "${BLUE}$BACKEND_AUTH_URL${NC}"
+    echo ""
+    echo "After Microsoft sign-in, the backend will connect Outlook for this deployment."
+    echo "Then try the Outlook request again."
+    return 0
 }
 
 azure_login() {
@@ -256,6 +289,38 @@ save_config() {
     echo -e "${GREEN}✓ Config saved to $CONFIG_FILE${NC}"
 }
 
+prepare_localhost_page() {
+    if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$SCRIPT_DIR/oauth-callback-server.py" ]; then
+        return 1
+    fi
+
+    local index_dir
+    index_dir="$(dirname "$LOCALHOST_INDEX")"
+
+    if [ -d "$index_dir" ]; then
+        if python3 "$SCRIPT_DIR/oauth-callback-server.py" --write-html "$LOCALHOST_INDEX" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        if command -v sudo >/dev/null 2>&1 \
+            && sudo -n true >/dev/null 2>&1 \
+            && sudo -n python3 "$SCRIPT_DIR/oauth-callback-server.py" --write-html "$LOCALHOST_INDEX" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    python3 "$SCRIPT_DIR/oauth-callback-server.py" >/dev/null 2>&1 &
+    CALLBACK_PID="$!"
+    sleep 0.5
+
+    if kill -0 "$CALLBACK_PID" 2>/dev/null; then
+        return 0
+    fi
+
+    CALLBACK_PID=""
+    return 1
+}
+
 authorize() {
     echo ""
     echo -e "${YELLOW}User Authorization${NC}"
@@ -264,11 +329,19 @@ authorize() {
     ENCODED_CLIENT_ID="$(jq -rn --arg v "$CLIENT_ID" '$v|@uri')"
     ENCODED_REDIRECT_URI="$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')"
     ENCODED_SCOPES="$(jq -rn --arg v "$SCOPES" '$v|@uri')"
-    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$ENCODED_CLIENT_ID&response_type=code&redirect_uri=$ENCODED_REDIRECT_URI&scope=$ENCODED_SCOPES"
+    AUTH_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=$ENCODED_CLIENT_ID&response_type=code&redirect_uri=$ENCODED_REDIRECT_URI&scope=$ENCODED_SCOPES&prompt=select_account"
 
     REDIRECT_URL="${1:-}"
+    CALLBACK_PID=""
 
     if [ -z "$REDIRECT_URL" ]; then
+        if prepare_localhost_page; then
+            echo -e "${GREEN}✓ Outlook connection page ready at http://localhost${NC}"
+        else
+            echo -e "${YELLOW}⚠ The Outlook connection page at http://localhost needs local web-server access.${NC}"
+            echo "Ask the machine owner to update $LOCALHOST_INDEX with the Outlook connection page, then open the link again."
+        fi
+
         echo "Open this URL in your browser:"
         echo ""
         echo -e "${BLUE}$AUTH_URL${NC}"
@@ -277,6 +350,10 @@ authorize() {
         echo "Paste the copied URL here:"
         echo ""
         read -r -p "URL: " REDIRECT_URL
+
+        if [ -n "$CALLBACK_PID" ] && kill -0 "$CALLBACK_PID" 2>/dev/null; then
+            kill "$CALLBACK_PID" 2>/dev/null || true
+        fi
     else
         echo "Using redirect URL passed as argument."
     fi
@@ -512,6 +589,10 @@ setup_cron() {
 
 main() {
     check_prereqs
+
+    if [ -z "${1:-}" ] && use_backend_authorization_if_configured; then
+        exit 0
+    fi
 
     if ! check_existing_creds; then
         azure_login
