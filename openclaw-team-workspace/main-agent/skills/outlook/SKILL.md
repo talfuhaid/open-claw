@@ -11,6 +11,19 @@ Access Outlook/Hotmail email and calendar via Microsoft Graph API using OAuth2.
 
 ## Quick Setup (Automated)
 
+### Backend-managed deployments
+
+When a deployment sets `OUTLOOK_CONNECT_URL` or `OUTLOOK_BACKEND_AUTH_URL`,
+the setup script prints that backend-generated Microsoft sign-in URL and
+stops. Open the URL in your browser; after Microsoft sign-in, the backend
+callback installs the Outlook tokens into the deployment.
+
+```bash
+./scripts/outlook-setup.sh
+```
+
+### Local or standalone machines
+
 1. First run script without arguments to initiate setup.
 
 ```bash

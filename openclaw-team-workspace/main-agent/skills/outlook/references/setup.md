@@ -18,6 +18,22 @@ what the script does, or for Option B (your own app registration).
 
 ## Recommended: run the automated script
 
+### Backend-managed deployments
+
+For deployed OpenClaw containers, the backend should own the OAuth callback.
+Set `OUTLOOK_CONNECT_URL` or `OUTLOOK_BACKEND_AUTH_URL` to a backend-generated
+Microsoft sign-in URL for the current deployment, then run:
+
+```bash
+~/Projects/openclaw-team-workspace/main-agent/skills/outlook/scripts/outlook-setup.sh
+```
+
+The script prints the URL and stops. Open the URL in your browser; after
+Microsoft sign-in, the backend callback stores `config.json` and
+`credentials.json` inside the deployment.
+
+### Local or standalone machines
+
 ```bash
 ~/Projects/openclaw-team-workspace/main-agent/skills/outlook/scripts/outlook-setup.sh
 ```
@@ -160,7 +176,7 @@ chmod 600 ~/.outlook-mcp/config.json
 Build the authorization URL (replace `YOUR_CLIENT_ID`):
 
 ```
-https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http%3A%2F%2Flocalhost&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMail.Send%20https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read%20https%3A%2F%2Fgraph.microsoft.com%2FUser.ReadBasic.All%20offline_access
+https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http%3A%2F%2Flocalhost&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMail.Send%20https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite%20https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read%20https%3A%2F%2Fgraph.microsoft.com%2FUser.ReadBasic.All%20offline_access&prompt=select_account
 ```
 
 1. Open the provided URL in your browser.

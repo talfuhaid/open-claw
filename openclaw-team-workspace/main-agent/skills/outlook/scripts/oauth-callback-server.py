@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import urllib.parse
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -221,9 +222,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
         query = parsed_path.query
         params = urllib.parse.parse_qs(query)
         if "code" in params:
-            # Dynamically determine the running address and port safely
-            server_host, server_port = self.server.server_address
-            redirect_url = f"http://{server_host}:{server_port}{self.path}"
+            _, server_port = self.server.server_address
+            port_suffix = "" if server_port == 80 else f":{server_port}"
+            redirect_url = f"http://localhost{port_suffix}{self.path}"
             
             print(redirect_url)
             sys.stdout.flush()
@@ -231,8 +232,12 @@ class CallbackHandler(BaseHTTPRequestHandler):
             sys.exit(0)
 
 def main():
-    # Dynamic fallback: default to 54321 if no argument is passed
-    port = 54321
+    if len(sys.argv) > 2 and sys.argv[1] == "--write-html":
+        Path(sys.argv[2]).write_text(HTML_CONTENT, encoding="utf-8")
+        return
+
+    # Default HTTP port keeps the OAuth redirect URI as plain http://localhost.
+    port = 80
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])
